@@ -2,7 +2,6 @@
 
 export const SECRET = 'SECr3t'; 
 import jwt from "jsonwebtoken"  
-import  { Request, Response ,NextFunction} from "express";
 export const generatetoken=(user )=>{
     return  jwt.sign({userid:user},SECRET,{expiresIn:"1h"})
     }
@@ -31,7 +30,7 @@ console.log(token)
             }
             else{     
                 console.log('3',data)
-                   req.headers.userid = data.userid._id;
+                   req.headers.userid = data[0].id;
                 next();
             
             }
