@@ -1,22 +1,23 @@
--- Enable extensions if needed (Supabase has them enabled by default)
--- CREATE EXTENSION IF NOT EXISTS "uuid-ossp"; -- For UUIDs, but we'll use SERIAL for simplicity
+-- Enable extensions if needed
+-- CREATE EXTENSION IF NOT EXISTS "uuid-ossp"; -- Optional if you want UUIDs
 
 -- 1. Users Table
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
+    password_hash TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE
 );
 
 -- 2. Clusters Table
 CREATE TABLE IF NOT EXISTS clusters (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
-    code VARCHAR(50),
-    company_chat_id INTEGER,
+    code VARCHAR(50) UNIQUE NOT NULL,
+    company_chat_id INTEGER REFERENCES chats(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -27,12 +28,12 @@ CREATE TABLE IF NOT EXISTS projects (
     cluster_id INTEGER NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
     description TEXT,
-    chat_id INTEGER,
+    chat_id INTEGER UNIQUE NOT NULL REFERENCES chats(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Index for fast project lookup by cluster (optimizes O(log n) queries)
+-- Index for fast project lookup by cluster
 CREATE INDEX idx_projects_cluster_id ON projects(cluster_id);
 
 -- 4. Tasks Table
@@ -52,6 +53,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Index for tasks per project
+CREATE INDEX idx_tasks_project_id ON tasks(project_id);
+
 -- 5. Chats Table
 CREATE TYPE chat_type AS ENUM ('project', 'company', 'dm');
 
@@ -62,10 +66,6 @@ CREATE TABLE IF NOT EXISTS chats (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Add FKs to Clusters and Projects (after chats table exists)
-ALTER TABLE clusters ADD FOREIGN KEY (company_chat_id) REFERENCES chats(id);
-ALTER TABLE projects ADD FOREIGN KEY (chat_id) REFERENCES chats(id);
-
 -- 6. Messages Table
 CREATE TYPE message_type AS ENUM ('text', 'image', 'file');
 
@@ -73,11 +73,13 @@ CREATE TABLE IF NOT EXISTS messages (
     id SERIAL PRIMARY KEY,
     chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     from_user_id INTEGER NOT NULL REFERENCES users(id),
-    to_user_id INTEGER REFERENCES users(id),
-    text TEXT NOT NULL,
+    text TEXT,
+    file_url TEXT,
+   to_user_id INTEGER REFERENCES messages(id),
     time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     type message_type DEFAULT 'text',
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE
 );
 
 -- Index for fast message retrieval
@@ -89,8 +91,10 @@ CREATE TYPE notification_type AS ENUM ('mention', 'assignment');
 CREATE TABLE IF NOT EXISTS notifications (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
+    source_user_id INTEGER REFERENCES users(id),
+    entity_type VARCHAR(50), -- 'task' or 'message'
+    entity_id INTEGER,
     type notification_type NOT NULL,
-    ref_id INTEGER NOT NULL, -- References message.id or task.id
     message VARCHAR(255) NOT NULL,
     is_read BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -110,6 +114,14 @@ CREATE TABLE IF NOT EXISTS cluster_members (
     PRIMARY KEY (cluster_id, user_id)
 );
 
+-- Enforce exactly one admin per cluster
+CREATE UNIQUE INDEX one_admin_per_cluster
+ON cluster_members(cluster_id)
+WHERE role = 'admin';
+
+-- Index for fast user -> clusters lookup
+CREATE INDEX idx_cluster_members_user_id ON cluster_members(user_id);
+
 -- 9. Project_Members Join Table
 CREATE TYPE project_role AS ENUM ('lead', 'member');
 
@@ -121,6 +133,14 @@ CREATE TABLE IF NOT EXISTS project_members (
     PRIMARY KEY (project_id, user_id)
 );
 
+-- Optional: enforce one lead per project
+CREATE UNIQUE INDEX one_lead_per_project
+ON project_members(project_id)
+WHERE role = 'lead';
+
+-- Index for fast user -> projects lookup
+CREATE INDEX idx_project_members_user_id ON project_members(user_id);
+
 -- 10. Task_Assignments Join Table
 CREATE TABLE IF NOT EXISTS task_assignments (
     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -129,10 +149,17 @@ CREATE TABLE IF NOT EXISTS task_assignments (
     PRIMARY KEY (task_id, user_id)
 );
 
--- 11. Optional: Chat_Members Join Table (if chats need explicit members)
+-- Index for fast user -> tasks lookup
+CREATE INDEX idx_task_assignments_user_id ON task_assignments(user_id);
+
+-- 11. Optional: Chat_Members Join Table
 CREATE TABLE IF NOT EXISTS chat_members (
     chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id),
+    role member_role DEFAULT 'member',
     joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (chat_id, user_id)
 );
+
+-- Index for fast user -> chats lookup
+CREATE INDEX idx_chat_members_user_id ON chat_members(user_id);
