@@ -1,7 +1,7 @@
 import e from "express"
 import cookieParser from "cookie-parser";
 import cors from "cors";
-
+import users from "./controllers/user.controller.js";
 const app = e();
 
 app.use((req, res, next) => {
@@ -23,6 +23,5 @@ app.use(cors({
 app.use(e.json({limit:"32kb"}));
 app.use(e.urlencoded({limit:"32kb",extended:true}));
 app.use(cookieParser());
-
-
-export {app}
+app.use('/user',users);
+export {app}    
