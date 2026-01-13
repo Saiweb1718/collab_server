@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX idx_notifications_user_id ON notifications(user_id);
 
 -- 8. Cluster_Members Join Table
-CREATE TYPE member_role AS ENUM ('owner', 'member');
+CREATE TYPE member_role AS ENUM ('admin', 'member');
 
 CREATE TABLE IF NOT EXISTS cluster_members (
     cluster_id INTEGER NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
