@@ -1,0 +1,47 @@
+# Node modules
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build / output folders (if any)
+dist/
+build/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Database / cache / temporary files
+*.sqlite
+*.db
+*.bak
+*.backup
+
+# Supabase local folder (if you keep it)
+.supabase/
+
+# Any local temp folders
+.cph/
+
+# Lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Coverage reports
+coverage/
