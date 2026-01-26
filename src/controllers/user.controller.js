@@ -88,8 +88,4 @@ router.get('/profile',Authorize,async (req,res)=>{
     }
 })
 
-
-
-
-
 export default router
