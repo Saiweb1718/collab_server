@@ -6,7 +6,7 @@
 -- ============================================================
 -- 0. ENUM TYPES (SAFE CREATION)
 -- ============================================================
--- chat_type
+-- chat_type  
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'chat_type') THEN
