@@ -1,5 +1,4 @@
 import dotenv from 'dotenv'
-import e from "express"
 import { app } from './app.js'
 import connectToDb from './db/index.js'
 dotenv.config({
@@ -12,5 +11,4 @@ connectToDb().then(()=>{
 })
 .catch((err)=>{
     console.log('connection fail ayindi' ,err);
-    
 })
