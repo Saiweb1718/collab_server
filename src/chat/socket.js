@@ -1,30 +1,33 @@
-import express from "express";
-import http from "http";
 import { Server } from "socket.io";
+import chatHandlers from "./chat.controller/chat.handlers.js";
 
-const app = express();
-const server = http.createServer(app);
 
-const io = new Server(server, {
-  cors: {
-    origin: "*", 
-    methods: ["GET", "POST"]
-  }
-});
+let io;
 
-io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
-
-  socket.on("message", (data) => {
-    console.log(data);
-    io.emit("message", data);
+function initSocket(server) {
+  io = new Server(server, {
+    cors: {
+      origin: "*",
+      credentials: true,
+    },
   });
 
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-  });
-});
+  io.on("connection", (socket) => {
+    console.log("Socket connected:", socket.id);
 
-server.listen(3000, () => {
-  console.log("Server running on port 3000");
-});
+    chatHandlers(io,socket);
+    
+    socket.on("disconnect", () => {
+      console.log("Socket disconnected:", socket.id);
+    });
+  });
+
+  return io;
+}
+
+function getIO() {
+  if (!io) throw new Error("Socket not initialized");
+  return io;
+}
+
+module.exports = { initSocket, getIO };
