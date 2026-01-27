@@ -3,6 +3,7 @@
 -- ============================================================
 -- Enable extensions if needed
 -- CREATE EXTENSION IF NOT EXISTS "uuid-ossp"; -- Optional if you want UUIDs
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- ============================================================
 -- 0. ENUM TYPES (SAFE CREATION)
 -- ============================================================
@@ -90,7 +91,7 @@ COMMIT;
 -- 1. USERS TABLE
 -- ============================================================
 CREATE TABLE IF NOT EXISTS users (
-    user_id SERIAL PRIMARY KEY,
+    user_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_name VARCHAR(255) NOT NULL,
     user_email VARCHAR(255) UNIQUE NOT NULL,
     user_password_hash TEXT NOT NULL,
@@ -102,7 +103,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- 2. CHATS TABLE
 -- ============================================================
 CREATE TABLE IF NOT EXISTS chats (
-    chat_id SERIAL PRIMARY KEY,
+    chat_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     chat_type chat_type NOT NULL,
     chat_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     chat_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -111,7 +112,7 @@ CREATE TABLE IF NOT EXISTS chats (
 -- 3. CLUSTERS TABLE
 -- ============================================================
 CREATE TABLE IF NOT EXISTS clusters (
-    cluster_id SERIAL PRIMARY KEY,
+    cluster_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
     cluster_name VARCHAR(255) NOT NULL,
     cluster_code VARCHAR(50) UNIQUE NOT NULL,
     cluster_company_chat_id INTEGER REFERENCES chats(chat_id),
@@ -122,7 +123,7 @@ CREATE TABLE IF NOT EXISTS clusters (
 -- 4. PROJECTS TABLE
 -- ============================================================
 CREATE TABLE IF NOT EXISTS projects (
-    project_id SERIAL PRIMARY KEY,
+    project_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
     project_cluster_id INTEGER NOT NULL REFERENCES clusters(cluster_id) ON DELETE CASCADE,
     project_name VARCHAR(255) NOT NULL,
     project_description TEXT,
@@ -137,7 +138,7 @@ ON projects(project_cluster_id);
 -- 5. TASKS TABLE
 -- ============================================================
 CREATE TABLE IF NOT EXISTS tasks (
-    task_id SERIAL PRIMARY KEY,
+    task_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
     task_project_id INTEGER NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
     task_name VARCHAR(255) NOT NULL,
     task_description TEXT,
@@ -155,7 +156,7 @@ ON tasks(task_project_id);
 -- 6. MESSAGES TABLE
 -- ============================================================
 CREATE TABLE IF NOT EXISTS messages (
-    message_id SERIAL PRIMARY KEY,
+    message_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
     message_chat_id INTEGER NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
     message_from_user_id INTEGER NOT NULL REFERENCES users(user_id),
     message_text TEXT,
@@ -189,7 +190,7 @@ ON message_read_receipts(receipt_user_id);
 -- 8. NOTIFICATIONS TABLE
 -- ============================================================
 CREATE TABLE IF NOT EXISTS notifications (
-    notification_id SERIAL PRIMARY KEY,
+    notification_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
     notification_user_id INTEGER NOT NULL REFERENCES users(user_id),
     notification_source_user_id INTEGER REFERENCES users(user_id),
     notification_entity_type VARCHAR(50), -- 'task' or 'message'
