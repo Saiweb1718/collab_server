@@ -53,3 +53,4 @@ export const Authorize = (req, res, next) => {
 
 // Backwards-compatible alias used by older imports.
 export const generatetoken = generateToken;
+

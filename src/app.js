@@ -15,9 +15,21 @@ import { ApiError } from './utils/ApiError.js';
 
 const app = express();
 
+// CORS_ORIGIN may be a single origin or a comma-separated allow-list, e.g.
+// "https://your-app.vercel.app,http://localhost:5173". Trailing slashes ignored.
+const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
+  .split(',')
+  .map((s) => s.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
 app.use(
   cors({
-    origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // non-browser clients (curl, server-to-server)
+      const clean = origin.replace(/\/+$/, '');
+      if (allowedOrigins.includes('*') || allowedOrigins.includes(clean)) return cb(null, true);
+      return cb(new Error(`Origin ${origin} not allowed by CORS`));
+    },
     credentials: true,
   })
 );

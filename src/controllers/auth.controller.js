@@ -5,10 +5,14 @@ import { ApiResponse } from '../utils/ApiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { generateToken, AUTH_COOKIE } from '../middlewares/auth.middlewares.js';
 
+// In production the frontend and API are on different domains, so the cookie
+// fallback must be SameSite=None; Secure (None requires Secure). The primary
+// auth path is the bearer token in the Authorization header.
+const isProd = process.env.NODE_ENV === 'production';
 const cookieOptions = {
   httpOnly: true,
-  sameSite: 'lax',
-  secure: process.env.NODE_ENV === 'production',
+  sameSite: isProd ? 'none' : 'lax',
+  secure: isProd,
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
 
