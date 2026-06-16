@@ -39,3 +39,12 @@ export const createNotification = async ({
 
 export const notifyMany = (recipients = [], base) =>
   Promise.all(recipients.map((userId) => createNotification({ ...base, userId })));
+
+// Push an arbitrary realtime event to a single user's socket room (best-effort).
+export const emitToUser = (userId, event, payload) => {
+  try {
+    getIO().to(roomForUser(userId)).emit(event, payload);
+  } catch {
+    /* socket not ready — fine */
+  }
+};

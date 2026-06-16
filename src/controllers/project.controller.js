@@ -9,7 +9,7 @@ import {
   getProjectRole,
   CLUSTER_ADMIN_ROLES,
 } from '../utils/permissions.js';
-import { createNotification, notifyMany } from '../notifications/notification.service.js';
+import { createNotification, notifyMany, emitToUser } from '../notifications/notification.service.js';
 
 // user ids who can manage a project: its leads + the cluster's owner/admins
 const getProjectManagerIds = async (projectId, clusterId) => {
@@ -226,10 +226,17 @@ export const addMember = asyncHandler(async (req, res) => {
   const proj = await query('SELECT project_chat_id, project_name FROM projects WHERE project_id = $1', [projectId]);
 
   await withTransaction(async (client) => {
+    // Auto-heal: if the project has no lead (e.g. a previously orphaned one),
+    // the first person added becomes its lead.
+    const hasLead = await client.query(
+      `SELECT 1 FROM project_members WHERE project_member_project_id = $1 AND project_member_role = 'lead' LIMIT 1`,
+      [projectId]
+    );
+    const newRole = hasLead.rowCount === 0 ? 'lead' : 'member';
     await client.query(
       `INSERT INTO project_members (project_member_project_id, project_member_user_id, project_member_role)
-       VALUES ($1,$2,'member') ON CONFLICT DO NOTHING`,
-      [projectId, targetId]
+       VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+      [projectId, targetId, newRole]
     );
     if (proj.rows[0].project_chat_id) {
       await client.query(
@@ -248,16 +255,30 @@ export const addMember = asyncHandler(async (req, res) => {
     entityId: projectId,
     message: `You were added to "${proj.rows[0].project_name}"`,
   });
+  emitToUser(targetId, 'membership:changed', { projectId, clusterId, status: 'added' });
 
   return res.status(200).json(new ApiResponse(200, { projectId, userId: targetId }, 'Member added'));
 });
 
 export const removeMember = asyncHandler(async (req, res) => {
   const { projectId, userId: targetId } = req.params;
-  await requireProjectManager(projectId, req.user.userId);
+  const { clusterId } = await requireProjectManager(projectId, req.user.userId);
 
   const proj = await query('SELECT project_chat_id FROM projects WHERE project_id = $1', [projectId]);
   await withTransaction(async (client) => {
+    // Lock the project's lead rows so concurrent removals serialize. This is the
+    // guard that stops two leads from removing each other and orphaning the
+    // project: the second removal re-reads the (now smaller) lead set and is
+    // blocked if it would remove the last lead.
+    const leads = await client.query(
+      `SELECT project_member_user_id AS id FROM project_members
+        WHERE project_member_project_id = $1 AND project_member_role = 'lead' FOR UPDATE`,
+      [projectId]
+    );
+    const leadIds = leads.rows.map((r) => r.id);
+    if (leadIds.includes(targetId) && leadIds.length <= 1) {
+      throw new ApiError(400, 'You can\'t remove the only project lead. Assign another lead first.');
+    }
     await client.query(
       'DELETE FROM project_members WHERE project_member_project_id = $1 AND project_member_user_id = $2',
       [projectId, targetId]
@@ -276,6 +297,7 @@ export const removeMember = asyncHandler(async (req, res) => {
       );
     }
   });
+  emitToUser(targetId, 'membership:changed', { projectId, clusterId, status: 'removed' });
   return res.status(200).json(new ApiResponse(200, { projectId, userId: targetId }, 'Member removed'));
 });
 
@@ -285,12 +307,27 @@ export const setMemberRole = asyncHandler(async (req, res) => {
   await requireProjectManager(projectId, req.user.userId);
   if (!['lead', 'member'].includes(role)) throw new ApiError(400, 'Invalid role');
 
-  const { rowCount } = await query(
-    `UPDATE project_members SET project_member_role = $3
-      WHERE project_member_project_id = $1 AND project_member_user_id = $2`,
-    [projectId, targetId, role]
-  );
-  if (rowCount === 0) throw new ApiError(404, 'That user is not a project member');
+  const updated = await withTransaction(async (client) => {
+    if (role === 'member') {
+      // demoting a lead — make sure it isn't the last one
+      const leads = await client.query(
+        `SELECT project_member_user_id AS id FROM project_members
+          WHERE project_member_project_id = $1 AND project_member_role = 'lead' FOR UPDATE`,
+        [projectId]
+      );
+      const leadIds = leads.rows.map((r) => r.id);
+      if (leadIds.includes(targetId) && leadIds.length <= 1) {
+        throw new ApiError(400, 'You can\'t demote the only project lead. Promote another lead first.');
+      }
+    }
+    const { rowCount } = await client.query(
+      `UPDATE project_members SET project_member_role = $3
+        WHERE project_member_project_id = $1 AND project_member_user_id = $2`,
+      [projectId, targetId, role]
+    );
+    return rowCount;
+  });
+  if (updated === 0) throw new ApiError(404, 'That user is not a project member');
   return res.status(200).json(new ApiResponse(200, { projectId, userId: targetId, role }, 'Role updated'));
 });
 
@@ -300,17 +337,37 @@ export const leaveProject = asyncHandler(async (req, res) => {
   if (!projectId) throw new ApiError(400, 'projectId is required');
 
   const proj = await query('SELECT project_chat_id FROM projects WHERE project_id = $1', [projectId]);
-  const { rowCount } = await query(
-    'DELETE FROM project_members WHERE project_member_project_id = $1 AND project_member_user_id = $2',
-    [projectId, userId]
-  );
-  if (rowCount === 0) throw new ApiError(404, 'You are not a member of this project');
-  if (proj.rows[0]?.project_chat_id) {
-    await query('DELETE FROM chat_members WHERE chat_member_chat_id = $1 AND chat_member_user_id = $2', [
-      proj.rows[0].project_chat_id,
-      userId,
-    ]);
-  }
+  const removed = await withTransaction(async (client) => {
+    const leads = await client.query(
+      `SELECT project_member_user_id AS id FROM project_members
+        WHERE project_member_project_id = $1 AND project_member_role = 'lead' FOR UPDATE`,
+      [projectId]
+    );
+    const leadIds = leads.rows.map((r) => r.id);
+    if (leadIds.includes(userId) && leadIds.length <= 1) {
+      throw new ApiError(400, 'You are the only project lead. Assign another lead or delete the project before leaving.');
+    }
+    const del = await client.query(
+      'DELETE FROM project_members WHERE project_member_project_id = $1 AND project_member_user_id = $2',
+      [projectId, userId]
+    );
+    if (del.rowCount > 0) {
+      await client.query(
+        `DELETE FROM task_assignments ta USING tasks t
+          WHERE ta.task_assignment_task_id = t.task_id
+            AND t.task_project_id = $1 AND ta.task_assignment_user_id = $2`,
+        [projectId, userId]
+      );
+      if (proj.rows[0]?.project_chat_id) {
+        await client.query('DELETE FROM chat_members WHERE chat_member_chat_id = $1 AND chat_member_user_id = $2', [
+          proj.rows[0].project_chat_id,
+          userId,
+        ]);
+      }
+    }
+    return del.rowCount;
+  });
+  if (removed === 0) throw new ApiError(404, 'You are not a member of this project');
   return res.status(200).json(new ApiResponse(200, { projectId }, 'Left project'));
 });
 
@@ -368,7 +425,7 @@ export const decideJoinRequest = asyncHandler(async (req, res) => {
   const { projectId, requestId } = req.params;
   const { decision } = req.body; // 'approve' | 'reject'
   const deciderId = req.user.userId;
-  await requireProjectManager(projectId, deciderId);
+  const { clusterId } = await requireProjectManager(projectId, deciderId);
   if (!['approve', 'reject'].includes(decision)) throw new ApiError(400, 'Invalid decision');
 
   const reqRow = await query(
@@ -388,10 +445,16 @@ export const decideJoinRequest = asyncHandler(async (req, res) => {
       [decision === 'approve' ? 'approved' : 'rejected', deciderId, requestId]
     );
     if (decision === 'approve') {
+      // Auto-heal a leaderless (previously orphaned) project.
+      const hasLead = await client.query(
+        `SELECT 1 FROM project_members WHERE project_member_project_id = $1 AND project_member_role = 'lead' LIMIT 1`,
+        [projectId]
+      );
+      const newRole = hasLead.rowCount === 0 ? 'lead' : 'member';
       await client.query(
         `INSERT INTO project_members (project_member_project_id, project_member_user_id, project_member_role)
-         VALUES ($1,$2,'member') ON CONFLICT DO NOTHING`,
-        [projectId, requesterId]
+         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+        [projectId, requesterId, newRole]
       );
       if (proj.rows[0].project_chat_id) {
         await client.query(
@@ -413,6 +476,11 @@ export const decideJoinRequest = asyncHandler(async (req, res) => {
       decision === 'approve'
         ? `Your request to join "${proj.rows[0].project_name}" was approved`
         : `Your request to join "${proj.rows[0].project_name}" was declined`,
+  });
+  emitToUser(requesterId, 'membership:changed', {
+    projectId,
+    clusterId,
+    status: decision === 'approve' ? 'approved' : 'rejected',
   });
 
   return res.status(200).json(new ApiResponse(200, { requestId, decision }, 'Request updated'));
