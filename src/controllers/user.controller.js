@@ -1,91 +1,66 @@
-import express from "express"
-import { Authorize, generatetoken } from "../middlewares/auth.middlewares.js";
-export const SECRET = 'SECr3t'; 
-import {supabase} from "../utils/supabase.js"
-const router = express.Router()
-import argon2 from "argon2"
+import argon2 from 'argon2';
+import { query } from '../db/index.js';
+import { ApiError } from '../utils/ApiError.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 
-router.post('/login',async (req,res)=>{
-    const {email,password} = req.body;
-    const {data,error} = await supabase
-    .from('users')
-    .select('*')
-    .eq('email',email)
-    // .eq('password_hash',password)
+export const searchUsers = asyncHandler(async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (q.length < 2) return res.status(200).json(new ApiResponse(200, [], 'OK'));
+  const { rows } = await query(
+    `SELECT user_id, user_name, user_email, user_avatar_url, user_title
+       FROM users
+      WHERE (user_name ILIKE $1 OR user_email ILIKE $1) AND user_id <> $2
+      ORDER BY user_name LIMIT 10`,
+    [`%${q}%`, req.user.userId]
+  );
+  return res.status(200).json(new ApiResponse(200, rows, 'OK'));
+});
 
-    if(error){
-        return res.status(500).json({message:error})
-    }
-    if(data.length ===0){
-        return res.status(401).json({message:"Invalid email"})
-    }   
-    if(data.length >0){
-        console.log("user found:",data[0].password_hash)
-            const isValid = await argon2.verify(
-  data[0].password_hash,
-  password
-)   
-        if (!isValid) {
-    return res.status(401).json({ message: "Invalid Credentials" });
+export const getProfile = asyncHandler(async (req, res) => {
+  const { rows } = await query(
+    `SELECT user_id, user_name, user_email, user_avatar_url, user_title, user_bio, user_created_at
+       FROM users WHERE user_id = $1`,
+    [req.params.userId]
+  );
+  if (rows.length === 0) throw new ApiError(404, 'User not found');
+  return res.status(200).json(new ApiResponse(200, rows[0], 'OK'));
+});
+
+export const updateProfile = asyncHandler(async (req, res) => {
+  const { name, title, bio, avatarUrl } = req.body;
+  const fields = [];
+  const values = [];
+  let i = 1;
+  const set = (col, val) => { fields.push(`${col} = $${i++}`); values.push(val); };
+  if (name !== undefined) {
+    if (!name.trim()) throw new ApiError(400, 'Name cannot be empty');
+    set('user_name', name.trim());
   }
+  if (title !== undefined) set('user_title', title);
+  if (bio !== undefined) set('user_bio', bio);
+  if (avatarUrl !== undefined) set('user_avatar_url', avatarUrl);
+  if (fields.length === 0) throw new ApiError(400, 'Nothing to update');
 
+  values.push(req.user.userId);
+  const { rows } = await query(
+    `UPDATE users SET ${fields.join(', ')} WHERE user_id = $${i}
+      RETURNING user_id, user_name, user_email, user_avatar_url, user_title, user_bio`,
+    values
+  );
+  return res.status(200).json(new ApiResponse(200, rows[0], 'Profile updated'));
+});
 
-        console.log("user logged in:",data)
-        const token = generatetoken(data);
-        res.cookie('authToken',token,{httpOnly:true,sameSite:'lax'});
-        return res.status(200).json({message:"Login Successful"})
-    }   
-})
+export const changePassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) throw new ApiError(400, 'Both passwords are required');
+  if (newPassword.length < 6) throw new ApiError(400, 'New password must be at least 6 characters');
 
-router.post('/signup',async (req,res)=>{
-    const {name,password,email} = req.body;
-    const {data,error} = await supabase
-    .from('users')
-    .select('*')
-    .eq('email',email)
-    if(error){
-        return res.status(500).json({message:"Internal Server Error"})
-    }   
-    if(data.length >0){
-        return res.status(409).json({message:"User Already Exists"})
-    }
-const hash = await argon2.hash(password, {
-  type: argon2.argon2id
-})
+  const { rows } = await query('SELECT user_password_hash FROM users WHERE user_id = $1', [req.user.userId]);
+  const valid = await argon2.verify(rows[0].user_password_hash, currentPassword);
+  if (!valid) throw new ApiError(401, 'Current password is incorrect');
 
-    const { data: insertData, error: insertError } = await supabase
-    .from('users')
-    .insert([{name:name,password_hash :hash,email:email}])
-    .select();
-
-    console.log(data,error)
-    if(error){
-        return res.status(500).json({message:insertError})
-    }
-    if(data){   
-        console.log("user created:",data,insertData)
-        const token = generatetoken(data);
-        res.cookie('authToken',token,{httpOnly:true,sameSite:'lax'});
-        return res.status(200).json({message:"Signup Successful"})
-    }
-})
-router.get('/profile',Authorize,async (req,res)=>{
-    const userId = req.headers.userid;
-    console.log("profile user id =",userId)
-    const {data,error} = await supabase
-    .from('users')
-    .select('*')
-    .eq('id',userId)
-    if(error){
-        return res.status(500).json({message:"Internal Server Error"})
-    }
-    if(data.length ===0){
-        return res.status(404).json({message:"User Not Found"})
-    }
-    if(data.length >0){
-        console.log("user profile:",data)
-        return res.status(200).json({profile:data[0]})
-    }
-})
-
-export default router
+  const hash = await argon2.hash(newPassword, { type: argon2.argon2id });
+  await query('UPDATE users SET user_password_hash = $1 WHERE user_id = $2', [hash, req.user.userId]);
+  return res.status(200).json(new ApiResponse(200, null, 'Password changed'));
+});

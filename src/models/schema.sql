@@ -1,106 +1,100 @@
 -- ============================================================
--- SAFE + RE-RUNNABLE FULL SCHEMA (PostgreSQL)
+-- SAFE + RE-RUNNABLE FULL SCHEMA (PostgreSQL / Supabase)
+-- All primary keys and foreign keys use UUID consistently.
 -- ============================================================
--- Enable extensions if needed
--- CREATE EXTENSION IF NOT EXISTS "uuid-ossp"; -- Optional if you want UUIDs
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
 -- ============================================================
--- 0. ENUM TYPES (SAFE CREATION)
+-- 0. ENUM TYPES (idempotent)
 -- ============================================================
--- chat_type  
-DO $$
-BEGIN
+DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'chat_type') THEN
         CREATE TYPE chat_type AS ENUM ('project', 'company', 'direct');
     END IF;
 END $$;
--- task_priority
-DO $$
-BEGIN
+
+DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'task_priority') THEN
         CREATE TYPE task_priority AS ENUM ('low', 'medium', 'high');
     END IF;
 END $$;
--- task_status
-DO $$
-BEGIN
+
+DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'task_status') THEN
         CREATE TYPE task_status AS ENUM ('todo', 'in_progress', 'done');
     END IF;
 END $$;
--- message_type
-DO $$
-BEGIN
+
+DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_type') THEN
         CREATE TYPE message_type AS ENUM ('text', 'image', 'file');
     END IF;
 END $$;
--- notification_type
-DO $$
-BEGIN
+
+DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notification_type') THEN
-        CREATE TYPE notification_type AS ENUM ('mention', 'assignment');
+        CREATE TYPE notification_type AS ENUM ('mention', 'assignment', 'message');
     END IF;
 END $$;
--- member_role
-DO $$
-BEGIN
+
+DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'member_role') THEN
         CREATE TYPE member_role AS ENUM ('admin', 'member');
     END IF;
 END $$;
--- Safely add 'admin' if missing
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_enum WHERE enumtypid = 'member_role'::regtype AND enumlabel = 'admin') THEN
-        ALTER TYPE member_role ADD VALUE 'admin';
-    END IF;
-END $$;
--- Safely add 'member' if missing
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_enum WHERE enumtypid = 'member_role'::regtype AND enumlabel = 'member') THEN
-        ALTER TYPE member_role ADD VALUE 'member';
-    END IF;
-END $$;
--- project_role
-DO $$
-BEGIN
+
+DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'project_role') THEN
         CREATE TYPE project_role AS ENUM ('lead', 'member');
     END IF;
 END $$;
--- Safely add 'lead' if missing
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_enum WHERE enumtypid = 'project_role'::regtype AND enumlabel = 'lead') THEN
-        ALTER TYPE project_role ADD VALUE 'lead';
-    END IF;
-END $$;
--- Safely add 'member' if missing
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_enum WHERE enumtypid = 'project_role'::regtype AND enumlabel = 'member') THEN
-        ALTER TYPE project_role ADD VALUE 'member';
-    END IF;
-END $$;
-
-COMMIT;
 
 -- ============================================================
--- 1. USERS TABLE
+-- generic updated_at trigger (works for any *_updated_at column,
+-- column name passed as the trigger argument)
+-- ============================================================
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW := json_populate_record(NEW, json_build_object(TG_ARGV[0], now()));
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- helper that creates an updated_at trigger only if it does not exist
+CREATE OR REPLACE FUNCTION ensure_updated_at_trigger(p_table TEXT, p_column TEXT)
+RETURNS VOID AS $$
+DECLARE
+    trg_name TEXT := 'trg_' || p_table || '_set_updated_at';
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = trg_name AND tgrelid = p_table::regclass
+    ) THEN
+        EXECUTE format(
+            'CREATE TRIGGER %I BEFORE UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION set_updated_at(%L)',
+            trg_name, p_table, p_column
+        );
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================
+-- 1. USERS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS users (
     user_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_name VARCHAR(255) NOT NULL,
     user_email VARCHAR(255) UNIQUE NOT NULL,
     user_password_hash TEXT NOT NULL,
+    user_avatar_url TEXT,
     user_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     user_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     user_is_active BOOLEAN DEFAULT TRUE
 );
+
 -- ============================================================
--- 2. CHATS TABLE
+-- 2. CHATS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS chats (
     chat_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -108,38 +102,39 @@ CREATE TABLE IF NOT EXISTS chats (
     chat_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     chat_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
 -- ============================================================
--- 3. CLUSTERS TABLE
+-- 3. CLUSTERS  (a "company"/workspace)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS clusters (
-    cluster_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
+    cluster_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     cluster_name VARCHAR(255) NOT NULL,
     cluster_code VARCHAR(50) UNIQUE NOT NULL,
-    cluster_company_chat_id INTEGER REFERENCES chats(chat_id),
+    cluster_company_chat_id UUID REFERENCES chats(chat_id) ON DELETE SET NULL,
     cluster_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     cluster_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
 -- ============================================================
--- 4. PROJECTS TABLE
+-- 4. PROJECTS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS projects (
-    project_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
-    project_cluster_id INTEGER NOT NULL REFERENCES clusters(cluster_id) ON DELETE CASCADE,
+    project_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_cluster_id UUID NOT NULL REFERENCES clusters(cluster_id) ON DELETE CASCADE,
     project_name VARCHAR(255) NOT NULL,
     project_description TEXT,
-    project_chat_id INTEGER UNIQUE NOT NULL REFERENCES chats(chat_id),
+    project_chat_id UUID UNIQUE REFERENCES chats(chat_id) ON DELETE SET NULL,
     project_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     project_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
--- Index for fast project lookup by cluster
-CREATE INDEX IF NOT EXISTS idx_projects_cluster_id
-ON projects(project_cluster_id);
+CREATE INDEX IF NOT EXISTS idx_projects_cluster_id ON projects(project_cluster_id);
+
 -- ============================================================
--- 5. TASKS TABLE
+-- 5. TASKS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS tasks (
-    task_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
-    task_project_id INTEGER NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+    task_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_project_id UUID NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
     task_name VARCHAR(255) NOT NULL,
     task_description TEXT,
     task_deadline DATE,
@@ -149,16 +144,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     task_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
--- Index for tasks per project
-CREATE INDEX IF NOT EXISTS idx_tasks_project_id
-ON tasks(task_project_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(task_project_id);
+
 -- ============================================================
--- 6. MESSAGES TABLE
+-- 6. MESSAGES
 -- ============================================================
 CREATE TABLE IF NOT EXISTS messages (
-    message_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
-    message_chat_id INTEGER NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
-    message_from_user_id INTEGER NOT NULL REFERENCES users(user_id),
+    message_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    message_chat_id UUID NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    message_from_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     message_text TEXT,
     message_file_url TEXT,
     message_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -166,244 +160,181 @@ CREATE TABLE IF NOT EXISTS messages (
     message_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     message_is_deleted BOOLEAN DEFAULT FALSE
 );
--- Index for fast message retrieval
-CREATE INDEX IF NOT EXISTS idx_messages_chat_id
-ON messages(message_chat_id);
-CREATE INDEX IF NOT EXISTS idx_messages_from_user_id
-ON messages(message_from_user_id);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(message_chat_id);
+CREATE INDEX IF NOT EXISTS idx_messages_from_user_id ON messages(message_from_user_id);
+
 -- ============================================================
--- 7. MESSAGE READ RECEIPTS TABLE
+-- 7. MESSAGE READ RECEIPTS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS message_read_receipts (
-    receipt_message_id INTEGER NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
-    receipt_user_id INTEGER NOT NULL REFERENCES users(user_id),
+    receipt_message_id UUID NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
+    receipt_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     receipt_delivered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     receipt_read_at TIMESTAMP,
     PRIMARY KEY (receipt_message_id, receipt_user_id)
 );
--- Indexes for read receipts
-CREATE INDEX IF NOT EXISTS idx_read_receipts_message_id
-ON message_read_receipts(receipt_message_id);
-CREATE INDEX IF NOT EXISTS idx_read_receipts_user_id
-ON message_read_receipts(receipt_user_id);
+CREATE INDEX IF NOT EXISTS idx_read_receipts_message_id ON message_read_receipts(receipt_message_id);
+CREATE INDEX IF NOT EXISTS idx_read_receipts_user_id ON message_read_receipts(receipt_user_id);
+
 -- ============================================================
--- 8. NOTIFICATIONS TABLE
+-- 8. NOTIFICATIONS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS notifications (
-    notification_id UUID PRIMARY KEY  DEFAULT gen_random_uuid(),
-    notification_user_id INTEGER NOT NULL REFERENCES users(user_id),
-    notification_source_user_id INTEGER REFERENCES users(user_id),
-    notification_entity_type VARCHAR(50), -- 'task' or 'message'
-    notification_entity_id INTEGER,
+    notification_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    notification_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    notification_source_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    notification_entity_type VARCHAR(50),
+    notification_entity_id UUID,
     notification_type notification_type NOT NULL,
     notification_message VARCHAR(255) NOT NULL,
     notification_is_read BOOLEAN DEFAULT FALSE,
     notification_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
--- Index for user notifications
-CREATE INDEX IF NOT EXISTS idx_notifications_user_id
-ON notifications(notification_user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(notification_user_id);
+
 -- ============================================================
--- 9. CLUSTER MEMBERS TABLE
+-- 9. CLUSTER MEMBERS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS cluster_members (
-    cluster_member_cluster_id INTEGER NOT NULL REFERENCES clusters(cluster_id) ON DELETE CASCADE,
-    cluster_member_user_id INTEGER NOT NULL REFERENCES users(user_id),
-    cluster_member_role member_role NOT NULL,
+    cluster_member_cluster_id UUID NOT NULL REFERENCES clusters(cluster_id) ON DELETE CASCADE,
+    cluster_member_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    cluster_member_role member_role NOT NULL DEFAULT 'member',
     cluster_member_joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (cluster_member_cluster_id, cluster_member_user_id)
 );
--- Enforce exactly one admin per cluster
--- Drop the index if it exists with wrong definition
 DROP INDEX IF EXISTS one_admin_per_cluster;
--- Create the correct partial unique index
 CREATE UNIQUE INDEX one_admin_per_cluster
-ON cluster_members(cluster_member_cluster_id)
-WHERE cluster_member_role = 'admin';
--- Index for fast user -> clusters lookup
-CREATE INDEX IF NOT EXISTS idx_cluster_members_user_id
-ON cluster_members(cluster_member_user_id);
+    ON cluster_members(cluster_member_cluster_id)
+    WHERE cluster_member_role = 'admin';
+CREATE INDEX IF NOT EXISTS idx_cluster_members_user_id ON cluster_members(cluster_member_user_id);
+
 -- ============================================================
--- 10. PROJECT MEMBERS TABLE
+-- 10. PROJECT MEMBERS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS project_members (
-    project_member_project_id INTEGER NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
-    project_member_user_id INTEGER NOT NULL REFERENCES users(user_id),
+    project_member_project_id UUID NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+    project_member_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     project_member_role project_role DEFAULT 'member',
     project_member_joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (project_member_project_id, project_member_user_id)
 );
--- Optional: enforce one lead per project
--- Drop the index if it exists with wrong definition
 DROP INDEX IF EXISTS one_lead_per_project;
--- Create the correct partial unique index
 CREATE UNIQUE INDEX one_lead_per_project
-ON project_members(project_member_project_id)
-WHERE project_member_role = 'lead';
--- Index for fast user -> projects lookup
-CREATE INDEX IF NOT EXISTS idx_project_members_user_id
-ON project_members(project_member_user_id);
+    ON project_members(project_member_project_id)
+    WHERE project_member_role = 'lead';
+CREATE INDEX IF NOT EXISTS idx_project_members_user_id ON project_members(project_member_user_id);
+
 -- ============================================================
--- 11. TASK ASSIGNMENTS TABLE
+-- 11. TASK ASSIGNMENTS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS task_assignments (
-    task_assignment_task_id INTEGER NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
-    task_assignment_user_id INTEGER NOT NULL REFERENCES users(user_id),
+    task_assignment_task_id UUID NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    task_assignment_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     task_assignment_assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (task_assignment_task_id, task_assignment_user_id)
 );
--- Index for fast user -> tasks lookup
-CREATE INDEX IF NOT EXISTS idx_task_assignments_user_id
-ON task_assignments(task_assignment_user_id);
+CREATE INDEX IF NOT EXISTS idx_task_assignments_user_id ON task_assignments(task_assignment_user_id);
+
 -- ============================================================
--- 12. CHAT MEMBERS TABLE
+-- 12. CHAT MEMBERS
 -- ============================================================
 CREATE TABLE IF NOT EXISTS chat_members (
-    chat_member_chat_id INTEGER NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
-    chat_member_user_id INTEGER NOT NULL REFERENCES users(user_id),
+    chat_member_chat_id UUID NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    chat_member_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     chat_member_role member_role DEFAULT 'member',
     chat_member_joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (chat_member_chat_id, chat_member_user_id)
 );
--- Index for fast user -> chats lookup
-CREATE INDEX IF NOT EXISTS idx_chat_members_user_id
-ON chat_members(chat_member_user_id);
-CREATE INDEX IF NOT EXISTS idx_chat_members_chat_id
-ON chat_members(chat_member_chat_id);
--- ============================================================
--- ADD TRIGGERS FOR AUTOMATIC updated_at UPDATES
--- ============================================================
--- Create the generic update function (safe to re-run)
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+CREATE INDEX IF NOT EXISTS idx_chat_members_user_id ON chat_members(chat_member_user_id);
+CREATE INDEX IF NOT EXISTS idx_chat_members_chat_id ON chat_members(chat_member_chat_id);
 
 -- ============================================================
--- Add trigger for users table
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger
-        WHERE tgname = 'trg_users_update_updated_at'
-        AND tgrelid = 'users'::regclass
-    ) THEN
-        CREATE TRIGGER trg_users_update_updated_at
-        BEFORE UPDATE ON users
-        FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at_column();
-    END IF;
-END $$;
+-- TRIGGERS for updated_at
+-- ============================================================
+SELECT ensure_updated_at_trigger('users',    'user_updated_at');
+SELECT ensure_updated_at_trigger('chats',    'chat_updated_at');
+SELECT ensure_updated_at_trigger('clusters', 'cluster_updated_at');
+SELECT ensure_updated_at_trigger('projects', 'project_updated_at');
+SELECT ensure_updated_at_trigger('tasks',    'task_updated_at');
+SELECT ensure_updated_at_trigger('messages', 'message_updated_at');
 
 -- ============================================================
--- Add trigger for chats table
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger
-        WHERE tgname = 'trg_chats_update_updated_at'
-        AND tgrelid = 'chats'::regclass
-    ) THEN
-        CREATE TRIGGER trg_chats_update_updated_at
-        BEFORE UPDATE ON chats
-        FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at_column();
-    END IF;
+-- v2: roles, visibility, join requests, mentions, profiles
+-- ============================================================
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='request_status') THEN
+    CREATE TYPE request_status AS ENUM ('pending','approved','rejected');
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='project_visibility') THEN
+    CREATE TYPE project_visibility AS ENUM ('members','company');
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='task_visibility') THEN
+    CREATE TYPE task_visibility AS ENUM ('all','assignee_only');
+  END IF;
 END $$;
 
--- ============================================================
--- Add trigger for clusters table
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger
-        WHERE tgname = 'trg_clusters_update_updated_at'
-        AND tgrelid = 'clusters'::regclass
-    ) THEN
-        CREATE TRIGGER trg_clusters_update_updated_at
-        BEFORE UPDATE ON clusters
-        FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at_column();
-    END IF;
-END $$;
+ALTER TYPE member_role ADD VALUE IF NOT EXISTS 'owner';
+ALTER TYPE notification_type ADD VALUE IF NOT EXISTS 'join_request';
+ALTER TYPE notification_type ADD VALUE IF NOT EXISTS 'join_approved';
+ALTER TYPE notification_type ADD VALUE IF NOT EXISTS 'join_rejected';
+ALTER TYPE notification_type ADD VALUE IF NOT EXISTS 'project_invite';
+
+ALTER TABLE users    ADD COLUMN IF NOT EXISTS user_bio TEXT;
+ALTER TABLE users    ADD COLUMN IF NOT EXISTS user_title VARCHAR(255);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS project_visibility project_visibility DEFAULT 'members';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS project_task_visibility task_visibility DEFAULT 'all';
+ALTER TABLE tasks    ADD COLUMN IF NOT EXISTS task_completed_at TIMESTAMP;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_is_edited BOOLEAN DEFAULT FALSE;
+
+-- multiple admins per cluster, multiple leads per project
+DROP INDEX IF EXISTS one_admin_per_cluster;
+DROP INDEX IF EXISTS one_lead_per_project;
+
+CREATE TABLE IF NOT EXISTS join_requests (
+  request_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_project_id UUID NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  request_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  request_status request_status NOT NULL DEFAULT 'pending',
+  request_message TEXT,
+  request_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  request_decided_by UUID REFERENCES users(user_id) ON DELETE SET NULL,
+  request_decided_at TIMESTAMP
+);
+DROP INDEX IF EXISTS uniq_pending_join_request;
+CREATE UNIQUE INDEX uniq_pending_join_request
+  ON join_requests(request_project_id, request_user_id)
+  WHERE request_status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_join_requests_project ON join_requests(request_project_id, request_status);
+CREATE INDEX IF NOT EXISTS idx_join_requests_user ON join_requests(request_user_id);
+
+CREATE TABLE IF NOT EXISTS message_mentions (
+  mention_message_id UUID NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
+  mention_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  PRIMARY KEY (mention_message_id, mention_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_mentions_user ON message_mentions(mention_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages(message_chat_id, message_time DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(notification_user_id, notification_is_read);
+CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(task_project_id, task_status);
+CREATE INDEX IF NOT EXISTS idx_tasks_completed_at ON tasks(task_completed_at);
 
 -- ============================================================
--- Add trigger for projects table
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger
-        WHERE tgname = 'trg_projects_update_updated_at'
-        AND tgrelid = 'projects'::regclass
-    ) THEN
-        CREATE TRIGGER trg_projects_update_updated_at
-        BEFORE UPDATE ON projects
-        FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at_column();
-    END IF;
-END $$;
-
+-- v3: completed-task archive (survives project/cluster deletion)
 -- ============================================================
--- Add trigger for tasks table
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger
-        WHERE tgname = 'trg_tasks_update_updated_at'
-        AND tgrelid = 'tasks'::regclass
-    ) THEN
-        CREATE TRIGGER trg_tasks_update_updated_at
-        BEFORE UPDATE ON tasks
-        FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at_column();
-    END IF;
-END $$;
-
--- ============================================================
--- Add trigger for messages table
--- Note: Renaming the field in the function for consistency, but it works on 'message_updated_at'
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger
-        WHERE tgname = 'trg_messages_update_updated_at'
-        AND tgrelid = 'messages'::regclass
-    ) THEN
-        CREATE TRIGGER trg_messages_update_updated_at
-        BEFORE UPDATE ON messages
-        FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at_column();
-    END IF;
-END $$;
--- ============================================================
--- HELPER QUERIES FOR READ RECEIPTS
--- ============================================================
--- Mark message as delivered to user
--- INSERT INTO message_read_receipts (receipt_message_id, receipt_user_id, receipt_delivered_at)
--- VALUES ($message_id, $user_id, CURRENT_TIMESTAMP)
--- ON CONFLICT (receipt_message_id, receipt_user_id) DO NOTHING;
--- Mark message as read by user
--- UPDATE message_read_receipts
--- SET receipt_read_at = CURRENT_TIMESTAMP
--- WHERE receipt_message_id = $message_id AND receipt_user_id = $user_id;
--- Get unread message count for a user in a chat
--- SELECT COUNT(DISTINCT m.message_id)
--- FROM messages m
--- JOIN chat_members cm
--- ON cm.chat_member_chat_id = m.message_chat_id
--- AND cm.chat_member_user_id = $user_id
--- LEFT JOIN message_read_receipts mrr
--- ON mrr.receipt_message_id = m.message_id
--- AND mrr.receipt_user_id = $user_id
--- WHERE m.message_chat_id = $chat_id
--- AND m.message_from_user_id != $user_id
--- AND mrr.receipt_read_at IS NULL;
--- Get delivery/read status for a specific message
--- SELECT u.user_id, u.user_name, mrr.receipt_delivered_at, mrr.receipt_read_at
--- FROM message_read_receipts mrr
--- JOIN users u ON u.user_id = mrr.receipt_user_id
--- WHERE mrr.receipt_message_id = $message_id
--- ORDER BY mrr.receipt_read_at DESC NULLS LAST;
+CREATE TABLE IF NOT EXISTS task_history (
+  history_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  history_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  history_task_name VARCHAR(255) NOT NULL,
+  history_project_name VARCHAR(255),
+  history_cluster_name VARCHAR(255),
+  history_priority task_priority DEFAULT 'medium',
+  history_completed_at TIMESTAMP,
+  history_archived_at TIMESTAMP DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_history_user
+  ON task_history(history_user_id, history_completed_at DESC);

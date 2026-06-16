@@ -1,27 +1,65 @@
-import e from "express"
-import cookieParser from "cookie-parser";
-import cors from "cors";
-import users from "./controllers/user.controller.js";
-const app = e();
+import express from 'express';
+import cookieParser from 'cookie-parser';
+import cors from 'cors';
 
-app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", process.env.CORS_ORIGIN);
-    res.header("Access-Control-Allow-Credentials", "true");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    next();
+import authRoutes from './routes/auth.routes.js';
+import clusterRoutes from './routes/cluster.routes.js';
+import projectRoutes from './routes/project.routes.js';
+import taskRoutes from './routes/task.routes.js';
+import userRoutes from './routes/user.routes.js';
+import chatRoutes from './routes/chat.routes.js';
+import notificationRoutes from './routes/notification.routes.js';
+import searchRoutes from './routes/search.routes.js';
+import uploadRoutes from './routes/upload.routes.js';
+import { ApiError } from './utils/ApiError.js';
+
+const app = express();
+
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+    credentials: true,
+  })
+);
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+app.use(cookieParser());
+
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+app.use('/api/auth', authRoutes);
+app.use('/api/clusters', clusterRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/tasks', taskRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/chats', chatRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/search', searchRoutes);
+app.use('/api/uploads', uploadRoutes);
+
+// 404
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: `Route not found: ${req.method} ${req.originalUrl}` });
 });
 
+// Central error handler — turns ApiError / pg errors into clean JSON.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, _next) => {
+  if (err instanceof ApiError) {
+    return res.status(err.statusCode).json({ success: false, message: err.message, errors: err.errors });
+  }
+  // Common Postgres errors
+  if (err?.code === '23505') {
+    return res.status(409).json({ success: false, message: 'Resource already exists' });
+  }
+  if (err?.code === '23503') {
+    return res.status(400).json({ success: false, message: 'Invalid reference (foreign key)' });
+  }
+  if (err?.code === '22P02') {
+    return res.status(400).json({ success: false, message: 'Invalid identifier format' });
+  }
+  console.error('Unhandled error:', err);
+  return res.status(500).json({ success: false, message: 'Internal server error' });
+});
 
-app.use(cors({
-    origin:process.env.CORS_ORIGIN,
-    credentials:true,
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    exposedHeaders: ['Authorization']
-}));
-
-app.use(e.json({limit:"32kb"}));
-app.use(e.urlencoded({limit:"32kb",extended:true}));
-app.use(cookieParser());
-app.use('/user',users);
-export {app}    
+export { app };
