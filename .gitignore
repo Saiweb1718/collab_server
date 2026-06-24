@@ -8,7 +8,9 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Environment variables
-
+.env
+.env.local
+.env.*.local
 
 # OS files
 .DS_Store
